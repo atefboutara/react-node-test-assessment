@@ -1,8 +1,9 @@
 import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
 import './App.css';
-
-const API_BASE_URL = process.env.REACT_APP_API_URL || 'http://localhost:3001';
+import Pusher from 'pusher-js';
+const API_BASE_URL =
+  process.env.REACT_APP_API_URL || 'http://localhost:3001';
 
 function App() {
   const [messages, setMessages] = useState([]);
@@ -14,11 +15,117 @@ function App() {
   const [error, setError] = useState('');
   const messagesEndRef = useRef(null);
   const fileInputRef = useRef(null);
+  const [searchTerm, setSearchTerm] = useState('');
+  const [searchResults, setSearchResults] = useState([]);
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [searchError, setSearchError] = useState('');
 
   useEffect(() => {
     fetchMessages();
   }, []);
+  
+  useEffect(() => {
+    const pusherKey = process.env.REACT_APP_PUSHER_KEY;
+    const pusherCluster = process.env.REACT_APP_PUSHER_CLUSTER;
 
+    if (!pusherKey || !pusherCluster) {
+      console.warn('Pusher is not configured. Realtime updates are disabled.');
+      return;
+    }
+
+    const pusher = new Pusher(pusherKey, {
+      cluster: pusherCluster,
+    });
+
+    const channel = pusher.subscribe('messages');
+
+    const handleNewMessage = (newMessage) => {
+      setMessages((previousMessages) => {
+        const alreadyExists = previousMessages.some(
+          (message) => message.id === newMessage.id
+        );
+
+        if (alreadyExists) {
+          return previousMessages;
+        }
+
+        return [...previousMessages, newMessage];
+      });
+    };
+
+    const handleDeletedMessage = (deletedMessage) => { 
+      setMessages((previousMessages) =>
+        previousMessages.filter(
+          (message) => message.id !== deletedMessage.id
+        )
+      );
+      setSearchResults((previousResults) => // in case we receive a delete event while searching, we also remove it from the search results
+        previousResults.filter(
+          (message) => message.id !== deletedMessage.id
+        )
+      );
+    };
+
+    channel.bind('new-message', handleNewMessage);
+    channel.bind('message-deleted', handleDeletedMessage);
+
+    return () => {
+      channel.unbind('new-message', handleNewMessage);
+      channel.unbind('message-deleted', handleDeletedMessage);
+      pusher.unsubscribe('messages');
+      pusher.disconnect();
+    };
+  }, []);
+  // Added a small debounced useeffect that waits until you stop typing for 300ms before sending the request
+  useEffect(() => {
+    const trimmedQuery = searchTerm.trim();
+
+    if (!trimmedQuery) {
+      setSearchResults([]);
+      setSearchLoading(false);
+      setSearchError('');
+      return;
+    }
+
+    const controller = new AbortController(); // AbortController to cancel the request if the user types again before the request completes
+    const timeoutId = setTimeout(async () => { // Debounce the search request
+      try {
+        setSearchLoading(true);
+        setSearchError('');
+
+        const response = await axios.get( // the request itself
+          `${API_BASE_URL}/api/messages/search`,
+          {
+            params: {
+              q: trimmedQuery,
+            },
+            signal: controller.signal,
+          }
+        );
+
+        setSearchResults(response.data.messages || []); // we set the results to the state
+      } catch (err) {
+        if (err.code === 'ERR_CANCELED') {
+          return;
+        }
+
+        console.error('Error searching messages:', err);
+        setSearchError(
+          err.response?.data?.error || 'Failed to search messages'
+        );
+        setSearchResults([]);
+      } finally {
+        if (!controller.signal.aborted) {
+          setSearchLoading(false); // we only set loading to false if the request was not aborted
+        }
+      }
+    }, 300);
+
+    return () => {
+      clearTimeout(timeoutId);
+      controller.abort();
+    };
+  }, [searchTerm]);
   // Auto-scroll to bottom when new messages arrive
   useEffect(() => {
     scrollToBottom();
@@ -139,6 +246,9 @@ function App() {
     try {
       await axios.delete(`${API_BASE_URL}/api/messages/${messageId}`);
       setMessages((prev) => prev.filter((msg) => msg.id !== messageId));
+      setSearchResults((prev) => // in case I want to delete a message while searching, we also remove it from the search results
+        prev.filter((msg) => msg.id !== messageId)
+      );
     } catch (err) {
       setError(err.response?.data?.error || 'Failed to delete message');
       console.error('Error deleting message:', err);
@@ -150,6 +260,78 @@ function App() {
     return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   };
 
+  const isSearching = searchTerm.trim().length > 0;
+
+  const displayedMessages = isSearching
+    ? searchResults
+    : messages;
+
+  const renderMessages = () => { //Function to render messages based on search state and loading/error states
+    if (isSearching) {
+      if (searchLoading) {
+        return <div className="loading">Searching...</div>;
+      }
+
+      if (searchError) {
+        return <div className="error-message">{searchError}</div>;
+      }
+
+      if (displayedMessages.length === 0) {
+        return (
+          <div className="no-messages">
+            No messages match your search.
+          </div>
+        );
+      }
+    } else {
+      if (loading && messages.length === 0) {
+        return <div className="loading">Loading messages...</div>;
+      }
+
+      if (messages.length === 0) {
+        return (
+          <div className="no-messages">
+            No messages yet. Start the conversation!
+          </div>
+        );
+      }
+    }
+
+    return displayedMessages.map((msg) => (
+      <div key={msg.id} className="message-item">
+        <div className="message-header">
+          <span className="message-username">{msg.username}</span>
+          <span className="message-time">
+            {formatTime(msg.created_at)}
+          </span>
+        </div>
+
+        {msg.image_url && (
+          <div className="message-image">
+            <img
+              src={`${API_BASE_URL}${msg.image_url}`}
+              alt="Shared"
+              onError={(e) => {
+                e.target.style.display = 'none';
+              }}
+            />
+          </div>
+        )}
+
+        {msg.message && (
+          <div className="message-text">{msg.message}</div>
+        )}
+
+        <button
+          className="delete-message-btn"
+          onClick={() => handleDeleteMessage(msg.id)}
+          title="Delete message"
+        >
+          ×
+        </button>
+      </div>
+    ));
+  };  
   return (
     <div className="App">
       <header className="App-header">
@@ -158,44 +340,19 @@ function App() {
       </header>
 
       <main className="chat-container">
+      <div className="search-container">
+        {/* Our search input field */}
+        <input
+          type="search"
+          placeholder="Search messages..."
+          value={searchTerm}
+          onChange={(e) => setSearchTerm(e.target.value)}
+          className="search-input"
+        />
+      </div>
         <div className="chat-messages" id="messages-container">
-          {loading && messages.length === 0 ? (
-            <div className="loading">Loading messages...</div>
-          ) : messages.length === 0 ? (
-            <div className="no-messages">
-              No messages yet. Start the conversation!
-            </div>
-          ) : (
-            messages.map((msg) => (
-              <div key={msg.id} className="message-item">
-                <div className="message-header">
-                  <span className="message-username">{msg.username}</span>
-                  <span className="message-time">{formatTime(msg.created_at)}</span>
-                </div>
-                {msg.image_url && (
-                  <div className="message-image">
-                    <img 
-                      src={`${API_BASE_URL}${msg.image_url}`} 
-                      alt="Shared" 
-                      onError={(e) => {
-                        e.target.style.display = 'none';
-                      }}
-                    />
-                  </div>
-                )}
-                {msg.message && (
-                  <div className="message-text">{msg.message}</div>
-                )}
-                <button
-                  className="delete-message-btn"
-                  onClick={() => handleDeleteMessage(msg.id)}
-                  title="Delete message"
-                >
-                  ×
-                </button>
-              </div>
-            ))
-          )}
+          {/* New method: Render messages based on search state and loading/error states */}
+          {renderMessages()}
           <div ref={messagesEndRef} />
         </div>
 

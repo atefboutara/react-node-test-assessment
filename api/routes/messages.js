@@ -3,6 +3,36 @@ const router = express.Router();
 const Message = require('../models/Message');
 const upload = require('../middleware/upload');
 const path = require('path');
+const { publishEvent } = require('../services/pusher');
+
+//Search endpoint
+router.get('/search', async (req, res) => {
+  try {
+  const { q } = req.query; // the search query parameter
+  if (typeof q !== 'string' || q.trim().length === 0) // Validate that q is a non-empty string
+    {
+      
+      return res.status(400).json({
+        success: false,
+        error: 'Search query is required',
+      });
+    }
+    const messages = await Message.search(q.trim(), 100); // Limit to 100 results as requested in the assignment 
+
+    res.json({
+      success: true,
+      messages,
+    });
+    
+  } catch (error) {
+    console.error('Error searching messages:', error);
+
+    res.status(500).json({
+      success: false,
+      error: 'Failed to search messages',
+    });
+  }
+});
 
 // Get all messages
 router.get('/', async (req, res) => {
@@ -38,7 +68,7 @@ router.post('/', async (req, res) => {
     }
 
     const newMessage = await Message.create(username, message.trim());
-
+    await publishEvent('new-message', newMessage);
     res.status(201).json({ success: true, message: newMessage });
   } catch (error) {
     console.error('Error creating message:', error);
@@ -70,7 +100,7 @@ router.post('/with-image', upload.single('image'), async (req, res) => {
     const messageText = message ? message.trim() : '';
 
     const newMessage = await Message.create(username, messageText, imageUrl);
-
+    await publishEvent('new-message', newMessage);
     res.status(201).json({ success: true, message: newMessage });
   } catch (error) {
     console.error('Error creating message with image:', error);
@@ -121,7 +151,7 @@ router.delete('/:id', async (req, res) => {
         error: 'Message not found' 
       });
     }
-
+    await publishEvent('message-deleted', deletedMessage);
     res.json({ success: true, message: 'Message deleted successfully' });
   } catch (error) {
     console.error('Error deleting message:', error);
