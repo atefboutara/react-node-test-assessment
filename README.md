@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 A small realtime chat application built with React and Express.
 
 The application supports text messages, image uploads, message deletion, realtime updates through Pusher Channels, and debounced message search.
